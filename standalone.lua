@@ -308,13 +308,14 @@ do
     })
     
     local ConfigFile = "LynxFarmConfig.json"
-    local farmConfig = { WebhookUrl = "", LastWebhookTime = 0 }
+    local farmConfig = { WebhookUrl = "", LastWebhookTime = 0, WebhookEnabled = false }
 
     if isfile and readfile and isfile(ConfigFile) then
         local s, data = pcall(function() return HttpService:JSONDecode(readfile(ConfigFile)) end)
         if s and type(data) == "table" then
             farmConfig.WebhookUrl = data.WebhookUrl or ""
             farmConfig.LastWebhookTime = tonumber(data.LastWebhookTime) or 0
+            if type(data.WebhookEnabled) == "boolean" then farmConfig.WebhookEnabled = data.WebhookEnabled end
         end
     end
 
@@ -325,49 +326,82 @@ do
     end
 
     local function SendWebhook(isTest)
+        if not isTest and not farmConfig.WebhookEnabled then return false, "Webhook disabled" end
         if farmConfig.WebhookUrl == "" then return false, "No URL" end
+        
+        local req = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+        if not req then return false, "Executor does not support requests" end
         
         local screws = LocalPlayer:GetAttribute("Screws") or (LocalPlayer:FindFirstChild("leaderstats") and LocalPlayer.leaderstats:FindFirstChild("Screws") and LocalPlayer.leaderstats.Screws.Value) or 0
         local gears = LocalPlayer:GetAttribute("Gears") or (LocalPlayer:FindFirstChild("leaderstats") and LocalPlayer.leaderstats:FindFirstChild("Gears") and LocalPlayer.leaderstats.Gears.Value) or 0
-        local playerName = LocalPlayer.DisplayName
+        local playerName = LocalPlayer.DisplayName or LocalPlayer.Name
+        
+        local KW_AVATAR_URL = "https://raw.githubusercontent.com/habibrodriguez7-art/kontol/refs/heads/main/majesticons--planet-ring-2.png"
+        local KW_BOT_NAME   = "Lynx | Auto Farm"
+        local KW_ORANGE     = 0xFF8C00
+        
+        local avatarImageUrl = nil
+        pcall(function()
+            local res = req({
+                Url    = string.format("https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=%d&size=420x420&format=Png&isCircular=false", LocalPlayer.UserId),
+                Method = "GET",
+            })
+            if res and res.Body then
+                local decoded = HttpService:JSONDecode(res.Body)
+                if decoded and decoded.data and decoded.data[1] then
+                    avatarImageUrl = decoded.data[1].imageUrl
+                end
+            end
+        end)
         
         local embedTitle = isTest and "Lynx Auto Farm - Webhook Test" or "Lynx Auto Farm - Status Update"
+        local alertText  = playerName .. " — Auto Farm Update"
         
         local data = {
-            ["content"] = "",
+            ["username"] = KW_BOT_NAME,
+            ["avatar_url"] = KW_AVATAR_URL,
+            ["content"] = alertText,
             ["embeds"] = {{
+                ["author"] = { ["name"] = KW_BOT_NAME, ["icon_url"] = KW_AVATAR_URL },
                 ["title"] = embedTitle,
-                ["description"] = "Player: **" .. playerName .. "**",
+                ["description"] = "Status akun **||" .. playerName .. "||** — Auto Farm Progress",
                 ["type"] = "rich",
-                ["color"] = tonumber(0x00ff00),
+                ["color"] = KW_ORANGE,
+                ["thumbnail"] = avatarImageUrl and { ["url"] = avatarImageUrl } or nil,
                 ["fields"] = {
-                    { ["name"] = "Screws", ["value"] = tostring(screws), ["inline"] = true },
-                    { ["name"] = "Gears", ["value"] = tostring(gears), ["inline"] = true }
+                    { ["name"] = "\227\128\162Screws :", ["value"] = "`" .. tostring(screws) .. "`", ["inline"] = true },
+                    { ["name"] = "\227\128\162Gears :", ["value"] = "`" .. tostring(gears) .. "`", ["inline"] = true }
                 },
-                ["timestamp"] = DateTime.now():ToIsoDate()
+                ["footer"] = { ["text"] = KW_BOT_NAME .. " • " .. os.date("%m/%d/%Y %I:%M") },
+                ["timestamp"] = os.date("!%Y-%m-%dT%H:%M:%SZ")
             }}
         }
         
-        local req = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-        if req then
-            local s, e = pcall(function()
-                req({
-                    Url = farmConfig.WebhookUrl,
-                    Method = "POST",
-                    Headers = {["Content-Type"] = "application/json"},
-                    Body = HttpService:JSONEncode(data)
-                })
-            end)
-            if s and not isTest then
-                farmConfig.LastWebhookTime = os.time()
-                SaveConfig()
-            end
-            return s, e
+        local s, e = pcall(function()
+            req({
+                Url = farmConfig.WebhookUrl,
+                Method = "POST",
+                Headers = {["Content-Type"] = "application/json"},
+                Body = HttpService:JSONEncode(data)
+            })
+        end)
+        
+        if s and not isTest then
+            farmConfig.LastWebhookTime = os.time()
+            SaveConfig()
         end
-        return false, "Executor does not support requests"
+        return s, e
     end
 
     local whSection = FarmTab:AddSection("Discord Webhook")
+    whSection:AddToggle({
+        Title = "Enable Discord Webhook",
+        Default = farmConfig.WebhookEnabled,
+        Callback = function(Value)
+            farmConfig.WebhookEnabled = Value
+            SaveConfig()
+        end
+    })
     whSection:AddInput({
         Title = "Webhook URL (5 Menit/Log)",
         Default = farmConfig.WebhookUrl,
