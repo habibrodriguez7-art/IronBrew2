@@ -94,11 +94,11 @@ do
                 local function DoServerHop()
                     if hopping then return end
                     hopping = true
-                    Notify("AutoFarm", "Mencari server baru...")
+                    Notify("AutoFarm", "Finding new server...")
                     task.spawn(function()
                         task.wait(15)
                         if hopping then
-                            Notify("AutoFarm", "Pencarian server lambat. Rejoining...")
+                            Notify("AutoFarm", "Slow server search. Rejoining...")
                             pcall(function() game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer) end)
                         end
                     end)
@@ -176,14 +176,14 @@ do
                     local teamName = LocalPlayer.Team and LocalPlayer.Team.Name or ""
                     
                     if teamName == "Killer" or teamName == "Murderer" then
-                        Notify("AutoFarm", "Terpilih sebagai Killer, mencari server baru...")
+                        Notify("AutoFarm", "Selected as Killer, finding new server...")
                         DoServerHop()
                     elseif teamName == "Survivors" then
                         autoFarmState.lobbyJoinTick = tick()
                         autoFarmState.roundStartTick = nil
                         if not escapeThread or coroutine.status(escapeThread) == "dead" then
                             escapeThread = task.spawn(function()
-                                -- Tunggu game termuat dengan sempurna sebelum teleport (menghindari nyangkut)
+                                -- Wait for the game to load perfectly before teleporting (avoids getting stuck)
                                 task.wait(5)
                                 
                                 local stuckTime = 0
@@ -198,7 +198,7 @@ do
                                             if d:IsA("BasePart") and (string.find(n, "fininshline") or string.find(n, "finishline") or n == "finish line" or n == "escape" or n == "exittrigger" or n == "escapetrigger") then
                                                 pcall(function() 
                                                     root.CFrame = d.CFrame * CFrame.new(0, math.random(-10, 10)/10, 0)
-                                                    task.wait(0.2) -- Jeda kecil agar server merespons CFrame kita
+                                                    task.wait(0.2) -- Small delay so the server responds to our CFrame
                                                     if firetouchinterest then
                                                         firetouchinterest(root, d, 0)
                                                         task.wait(0.1)
@@ -206,7 +206,7 @@ do
                                                     end
                                                 end)
                                                 triedEscape = true
-                                                task.wait(0.5) -- Jeda antar percobaan sentuh finish line
+                                                task.wait(0.5) -- Delay between finish line touch attempts
                                             end
                                         end
                                         
@@ -214,9 +214,9 @@ do
                                             task.wait(1.5)
                                             stuckTime = stuckTime + 2
                                             
-                                            -- Jika sudah mencoba escape namun stuck lebih dari 30 detik
+                                            -- If attempted to escape but stuck for more than 30 seconds
                                             if stuckTime > 30 then
-                                                Notify("AutoFarm", "Stuck saat mencoba escape, mencari server baru...")
+                                                Notify("AutoFarm", "Stuck while attempting to escape, finding new server...")
                                                 DoServerHop()
                                                 break
                                             end
@@ -239,7 +239,7 @@ do
                             if tLeft > 60 then
                                 DoServerHop()
                             else
-                                -- Game akan segera mulai, jangan hop dan reset timer stuck
+                                -- Game is about to start, do not hop and reset stuck timer
                                 autoFarmState.lobbyJoinTick = tick()
                             end
                         elseif string.find(ts, "round") or string.find(ts, "ingame") or string.find(ts, "match") then
@@ -247,12 +247,12 @@ do
                                 autoFarmState.roundStartTick = tick()
                             end
                             if autoFarmState.seenIntermission then
-                                -- Transisi dari Intermission ke Round, beri jeda 15 detik mencegah script hop sebelum teleport
+                                -- Transition from Intermission to Round, wait 15 seconds to prevent script hop before teleport
                                 if tick() - autoFarmState.roundStartTick > 15 then
                                     DoServerHop()
                                 end
                             else
-                                -- Join server yang match-nya sudah berjalan duluan (tanpa lewat Intermission), hop lebih cepat
+                                -- Joined a server where the match is already ongoing (without passing Intermission), hop faster
                                 if tick() - autoFarmState.roundStartTick > 3 then
                                     DoServerHop()
                                 end
@@ -270,9 +270,9 @@ do
                                         end
                                     end
                                 end)
-                                task.wait(3) -- Tunggu sebentar siapa tahu VIP server command startgame berhasil
+                                task.wait(3) -- Wait a moment in case VIP server startgame command succeeds
                             end
-                            -- Kalau masih di status waiting (startgame gagal/bukan VIP server), hop
+                            -- If still in waiting status (startgame failed/not VIP server), hop
                             if string.lower(autoFarmState.statusText) == st then
                                 DoServerHop()
                             end
@@ -281,8 +281,8 @@ do
                             local mapFolder = workspace:FindFirstChild("Map")
                             local isMapLoaded = mapFolder and #mapFolder:GetChildren() > 0
                             
-                            -- Jangan langsung hop saat baru execute/join. Tunggu 3 detik
-                            -- untuk menerima event pertama dari server.
+                            -- Do not hop immediately upon execute/join. Wait 3 seconds
+                            -- to receive the first event from the server.
                             if tick() - autoFarmState.lobbyJoinTick > 3 then
                                 if isMapLoaded then
                                     DoServerHop()
@@ -332,6 +332,7 @@ do
         local req = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
         if not req then return false, "Executor does not support requests" end
         
+        local level = LocalPlayer:GetAttribute("Level") or (LocalPlayer:FindFirstChild("leaderstats") and LocalPlayer.leaderstats:FindFirstChild("Level") and LocalPlayer.leaderstats.Level.Value) or 0
         local screws = LocalPlayer:GetAttribute("Screws") or (LocalPlayer:FindFirstChild("leaderstats") and LocalPlayer.leaderstats:FindFirstChild("Screws") and LocalPlayer.leaderstats.Screws.Value) or 0
         local gears = LocalPlayer:GetAttribute("Gears") or (LocalPlayer:FindFirstChild("leaderstats") and LocalPlayer.leaderstats:FindFirstChild("Gears") and LocalPlayer.leaderstats.Gears.Value) or 0
         local playerName = LocalPlayer.DisplayName or LocalPlayer.Name
@@ -364,11 +365,12 @@ do
             ["embeds"] = {{
                 ["author"] = { ["name"] = KW_BOT_NAME, ["icon_url"] = KW_AVATAR_URL },
                 ["title"] = embedTitle,
-                ["description"] = "Status akun **||" .. playerName .. "||** — Auto Farm Progress",
+                ["description"] = "Account status **||" .. playerName .. "||** — Auto Farm Progress",
                 ["type"] = "rich",
                 ["color"] = KW_ORANGE,
                 ["thumbnail"] = avatarImageUrl and { ["url"] = avatarImageUrl } or nil,
                 ["fields"] = {
+                    { ["name"] = "\227\128\162Level :", ["value"] = "`" .. tostring(level) .. "`", ["inline"] = true },
                     { ["name"] = "\227\128\162Screws :", ["value"] = "`" .. tostring(screws) .. "`", ["inline"] = true },
                     { ["name"] = "\227\128\162Gears :", ["value"] = "`" .. tostring(gears) .. "`", ["inline"] = true }
                 },
@@ -403,7 +405,7 @@ do
         end
     })
     whSection:AddInput({
-        Title = "Webhook URL (5 Menit/Log)",
+        Title = "Webhook URL (1 Hour/Log)",
         Default = farmConfig.WebhookUrl,
         Callback = function(Value)
             farmConfig.WebhookUrl = Value
@@ -415,20 +417,20 @@ do
         Callback = function()
             local s, err = SendWebhook(true)
             if s then
-                Notify("Webhook", "Test berhasil dikirim!")
+                Notify("Webhook", "Test sent successfully!")
             else
-                Notify("Webhook", "Gagal mengirim: " .. tostring(err))
+                Notify("Webhook", "Failed to send: " .. tostring(err))
             end
         end
     })
 
-    -- Background loop yang sangat ringan, tidak menyebabkan memory leak (karena hanya yield ringan)
+    -- Extremely lightweight background loop, does not cause memory leaks (due to light yield)
     task.spawn(function()
         task.wait(10)
         while task.wait(10) do
             if farmConfig.WebhookUrl ~= "" then
-                -- 300 detik = 5 menit (Sesuai permintaan untuk testing)
-                if os.time() - farmConfig.LastWebhookTime >= 300 then
+                -- 3600 seconds = 1 Hour
+                if os.time() - farmConfig.LastWebhookTime >= 3600 then
                     SendWebhook(false)
                 end
             end
