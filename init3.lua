@@ -1,5 +1,6 @@
 local Library = {}
 Library.flags = {}
+Library.Toggles = {}
 Library.pages = {}
 Library._navButtons = {}
 Library._currentPage = nil
@@ -1427,6 +1428,7 @@ function Library:CreateToggle(parent, label, configPath, callback, disableSave, 
         end,
         get = function() return on end
     }
+    Library.Toggles[label] = toggleController
     return toggleController
 end
 Library._dropdownOverlay = nil
@@ -2565,6 +2567,7 @@ function Library:Window(config)
                 local callback = dropdownConfig.Callback
                 local noSave   = dropdownConfig.NoSave or false
                 local isMulti  = dropdownConfig.Multi or false
+                local refreshToggle = dropdownConfig.RefreshToggle
                 local configPath = noSave and nil or ((isMulti and "MultiDropdowns." or "Dropdowns.") .. title:gsub("%s+", "_"))
                 local uniqueId   = title:gsub("%s+", "_")
                 -- Simpan default ke config jika belum ada
@@ -2574,12 +2577,27 @@ function Library:Window(config)
                         Library.ConfigSystem.Set(configPath, default)
                     end
                 end
+                
+                local wrappedCallback = function(val)
+                    if callback then callback(val) end
+                    if refreshToggle then
+                        local tController = Library.Toggles[refreshToggle]
+                        if tController and tController.get() then
+                            task.spawn(function()
+                                tController.set(false)
+                                task.wait(0.1)
+                                tController.set(true)
+                            end)
+                        end
+                    end
+                end
+
                 -- Buat dropdown frame via internal API
                 local frame
                 if isMulti then
-                    frame = self._library:CreateMultiDropdown(self._container, title, nil, options, configPath, callback, uniqueId, default)
+                    frame = self._library:CreateMultiDropdown(self._container, title, nil, options, configPath, wrappedCallback, uniqueId, default)
                 else
-                    frame = self._library:CreateDropdown(self._container, title, nil, options, configPath, callback, uniqueId, default)
+                    frame = self._library:CreateDropdown(self._container, title, nil, options, configPath, wrappedCallback, uniqueId, default)
                 end
                 if frame then frame.LayoutOrder = getNextLayoutOrder() end
                 registerFeature(title, frame, "Dropdown")
