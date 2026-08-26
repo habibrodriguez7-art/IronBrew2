@@ -2183,22 +2183,10 @@ function Library:Init()
     self:Initialize()
 end
 
-function Library:OnPostInit(callback)
-    if type(callback) == "function" then
-        self._postInitCallbacks = self._postInitCallbacks or {}
-        table.insert(self._postInitCallbacks, callback)
-    end
-end
-
 function Library:Initialize()
     if self._initialized then return end
     self._initialized = true
     ExecuteConfigCallbacks()
-    if self._postInitCallbacks then
-        for _, callback in pairs(self._postInitCallbacks) do
-            pcall(callback)
-        end
-    end
     if self._pendingWindowObj then
         pcall(function()
             self:_createConfigTab(self._pendingWindowObj)
@@ -2553,12 +2541,20 @@ function Library:Window(config)
                 local configPath = noSave and nil or ((isMulti and "MultiDropdowns." or "Dropdowns.") .. title:gsub("%s+", "_"))
                 local uniqueId   = title:gsub("%s+", "_")
                 if isMulti then
-                    local frame = self._library:CreateMultiDropdown(self._container, title, nil, options, configPath, callback, uniqueId)
+                    -- Set default ke config jika belum ada (sama seperti single dropdown)
+                    if default and configPath then
+                        local current = Library.ConfigSystem.Get(configPath, nil)
+                        if current == nil then
+                            Library.ConfigSystem.Set(configPath, default)
+                        end
+                    end
+                    local frame = self._library:CreateMultiDropdown(self._container, title, nil, options, configPath, callback, uniqueId, default)
                     if frame then frame.LayoutOrder = getNextLayoutOrder() end
                     registerFeature(title, frame, "Dropdown")
 
                     local dropdownObj = {
                         _options = options,
+                        Value    = Library.flags[uniqueId] and Library.flags[uniqueId].Value or (default or {}),
                         SetOptions = function(self, newOptions)
                             self._options = newOptions
                             local flagObj = Library.flags[uniqueId]
@@ -2570,17 +2566,20 @@ function Library:Window(config)
                             local flagObj = Library.flags[uniqueId]
                             if flagObj and flagObj.SetValue then
                                 flagObj:SetValue(val)
-                            elseif flagObj and flagObj.Set then
-                                flagObj:Set(val)
                             end
+                            self.Value = val
                         end,
                         GetValue = function(self)
                             local flagObj = Library.flags[uniqueId]
-                            if flagObj and flagObj.GetValue then
-                                return flagObj:GetValue()
+                            return flagObj and flagObj.Value or self.Value
+                        end,
+                        Refresh = function(self, newOptions, clearSel)
+                            self._options = newOptions
+                            local flagObj = Library.flags[uniqueId]
+                            if flagObj and flagObj.Refresh then
+                                flagObj:Refresh(newOptions)
                             end
-                            return nil
-                        end
+                        end,
                     }
                     return dropdownObj
                 end
@@ -2604,21 +2603,6 @@ function Library:Window(config)
                     end,
                     GetOptions = function(self)
                         return self._options
-                    end,
-                    SetValue = function(self, val)
-                        local flagObj = Library.flags[uniqueId]
-                        if flagObj and flagObj.SetValue then
-                            flagObj:SetValue(val)
-                        elseif flagObj and flagObj.Set then
-                            flagObj:Set(val)
-                        end
-                    end,
-                    GetValue = function(self)
-                        local flagObj = Library.flags[uniqueId]
-                        if flagObj and flagObj.GetValue then
-                            return flagObj:GetValue()
-                        end
-                        return nil
                     end
                 }
                 return dropdownObj
