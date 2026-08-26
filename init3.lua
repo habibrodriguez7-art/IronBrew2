@@ -270,31 +270,32 @@ local function RegisterCallback(configPath, callback, componentType, defaultValu
 end
 
 local function ExecuteConfigCallbacks()
-    -- Phase 1: restore every component's saved value + visual state WITHOUT
-    -- running any action callbacks. This guarantees that dropdown/input filter
-    -- values are already in place before any toggle action runs.
+    -- Phase 1: restore visual state for ALL components tanpa menjalankan
+    -- action callback. Ini memastikan tampilan UI sinkron duluan.
     for _, entry in pairs(CallbackRegistry) do
         if entry.updateVisual then
             local value = Library.ConfigSystem.Get(entry.path, entry.default)
             pcall(entry.updateVisual, value)
         end
     end
-    -- Phase 2: run action callbacks. Non-toggle components (dropdown, input,
-    -- etc.) run first so their filters/selections are fully applied, then
-    -- toggles run last -- a toggle like "Auto Favorite" therefore starts only
-    -- after its dropdown filter has been restored, fixing the load-order bug
-    -- where the toggle ran unfiltered on execute.
-    local function runCallbacks(wantToggle)
-        for _, entry in pairs(CallbackRegistry) do
-            local isToggle = entry.type == "toggle"
-            if entry.callback and isToggle == wantToggle then
-                local value = Library.ConfigSystem.Get(entry.path, entry.default)
-                pcall(entry.callback, value)
-            end
+    -- Phase 2a: jalankan callback non-toggle (dropdown, input, dll) duluan.
+    -- Ini memastikan semua nilai filter/pilihan dropdown sudah terisi
+    -- SEBELUM callback toggle berjalan.
+    for _, entry in pairs(CallbackRegistry) do
+        if entry.callback and entry.type ~= "toggle" then
+            local value = Library.ConfigSystem.Get(entry.path, entry.default)
+            pcall(entry.callback, value)
         end
     end
-    runCallbacks(false)
-    runCallbacks(true)
+    -- Phase 2b: setelah semua nilai dropdown sudah tersimpan di flags,
+    -- baru jalankan callback toggle. Toggle yang membaca dropdown
+    -- akan mendapatkan nilai yang sudah benar.
+    for _, entry in pairs(CallbackRegistry) do
+        if entry.callback and entry.type == "toggle" then
+            local value = Library.ConfigSystem.Get(entry.path, entry.default)
+            pcall(entry.callback, value)
+        end
+    end
 end
 _G.AutoSaveEnabled = true
 function _G.GetConfigValue(key, default)
@@ -1421,6 +1422,8 @@ function Library:CreateToggle(parent, label, configPath, callback, disableSave, 
                 MarkDirty()
             end
             Library.flags[configPath or label] = on
+            -- Memanggil callback agar fitur berjalan ketika SetValue dipanggil dari luar
+            if callback then callback(on) end
         end,
         get = function() return on end
     }
@@ -2539,11 +2542,17 @@ function Library:Window(config)
                 function toggleObj:SetValue(val)
                     self._value = val
                     if toggleResult and toggleResult.set then
+                        -- set() sekarang sudah memanggil callback,
+                        -- jadi tidak perlu panggil callback lagi di sini
                         toggleResult.set(val)
                     end
-                    if callback then callback(val) end
                 end
                 function toggleObj:GetValue()
+                    -- Baca dari toggleResult.get() agar selalu sinkron
+                    -- dengan state visual internal (bukan dari _value yang bisa stale)
+                    if toggleResult and toggleResult.get then
+                        return toggleResult.get()
+                    end
                     return self._value
                 end
                 return toggleObj
