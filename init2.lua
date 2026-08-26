@@ -2561,6 +2561,7 @@ function Library:Window(config)
                             if flagObj and flagObj.Refresh then
                                 flagObj:Refresh(newOptions)
                             end
+                        end,
                         SetValue = function(self, val)
                             local flagObj = Library.flags[uniqueId]
                             if flagObj and flagObj.SetValue then
