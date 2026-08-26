@@ -2561,24 +2561,16 @@ function Library:Window(config)
                             if flagObj and flagObj.Refresh then
                                 flagObj:Refresh(newOptions)
                             end
-                        end,
                         SetValue = function(self, val)
                             local flagObj = Library.flags[uniqueId]
                             if flagObj and flagObj.SetValue then
-                                flagObj:SetValue(val)
+                                pcall(function() flagObj:SetValue(val) end)
                             end
                             self.Value = val
                         end,
                         GetValue = function(self)
                             local flagObj = Library.flags[uniqueId]
                             return flagObj and flagObj.Value or self.Value
-                        end,
-                        Refresh = function(self, newOptions, clearSel)
-                            self._options = newOptions
-                            local flagObj = Library.flags[uniqueId]
-                            if flagObj and flagObj.Refresh then
-                                flagObj:Refresh(newOptions)
-                            end
                         end,
                     }
                     return dropdownObj
