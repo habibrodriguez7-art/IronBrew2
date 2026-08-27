@@ -1,6 +1,28 @@
+--[[
+    LynxGUI (LynX) — Roblox UI Library
+    ---------------------------------------------------------------
+    Pola pemakaian:
+        local Library = loadstring(...)()          -- muat library
+        Library.ConfigSystem.SetDefaults({...})    -- (opsional) default config
+        local Window  = Library:Window({ Title = "LynX", Footer = "..." })
+        local Tab     = Window:AddTab({ Name = "Main", Icon = "player" })
+        local Section = Tab:AddSection("Fitur")
+        Section:AddToggle({ Title = "Auto Farm", Default = true, Callback = function(on) ... end })
+        Section:AddDropdown({ Title = "Target", Options = {...}, Multi = true, Callback = function(v) ... end })
+        ...
+        Library:Init()   -- WAJIB di baris paling bawah: mengaktifkan semua fitur sesuai config
+
+    Catatan penting:
+    - Semua toggle/dropdown/input yang punya config akan otomatis memulihkan nilainya
+      dari file config, lalu callback-nya dijalankan tepat sekali saat Library:Init().
+      Jadi tidak akan ada lagi kasus "visual ON tapi fitur OFF".
+    - Judul komponen dipakai sebagai kunci config (mis. "Auto Farm" -> Toggles.Auto_Farm),
+      jadi gunakan judul yang unik per jenis komponen. Judul duplikat akan diberi warn.
+    - Komponen dengan NoSave = true tidak disimpan & tidak diaktifkan otomatis saat Init
+      (dipakai untuk kontrol UI sementara, mis. tombol "Auto Save Config").
+]]
 local Library = {}
 Library.flags = {}
-Library.Toggles = {}
 Library.pages = {}
 Library._navButtons = {}
 Library._currentPage = nil
@@ -24,7 +46,6 @@ local Players         = game:GetService("Players")
 local CoreGui         = game:GetService("CoreGui")
 local TweenService    = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
-local RunService      = game:GetService("RunService")
 local HttpService     = game:GetService("HttpService")
 local localPlayer     = Players.LocalPlayer
 local colors = {
@@ -41,19 +62,16 @@ local colors = {
     textDimmer = Color3.fromRGB(180, 160, 145),
     border = Color3.fromRGB(90, 45, 20),
 }
--- Detect platform: mobile = touch primary with no mouse; PC = everything else.
--- Mobile keeps the original compact size; PC gets a larger default and a wider
--- resize ceiling so the window can stretch for desktop play.
 local isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
 local windowSize, minWindowSize, maxWindowSize
 if isMobile then
-    windowSize    = UDim2.new(0, 420, 0, 280) -- sama persis seperti ukuran lama
+    windowSize    = UDim2.new(0, 420, 0, 280) 
     minWindowSize = Vector2.new(380, 250)
     maxWindowSize = Vector2.new(800, 600)
-else -- PC / desktop
-    windowSize    = UDim2.new(0, 560, 0, 360) -- lebih lebar & lebih tinggi
+else 
+    windowSize    = UDim2.new(0, 560, 0, 360) 
     minWindowSize = Vector2.new(440, 300)
-    maxWindowSize = Vector2.new(1100, 760)    -- ceiling resize lebih besar
+    maxWindowSize = Vector2.new(1100, 760)    
 end
 local sidebarWidth = 120
 local headerHeight = 34
@@ -68,7 +86,6 @@ local fontSize = {
     normal = 11,
     small = 10,
 }
-
 local function formatRichText(text)
     if type(text) ~= "string" or text == "" then
         return ""
@@ -80,14 +97,12 @@ local function formatRichText(text)
         return string.format('<font color="#%02X%02X%02X">', r, g, b)
     end))
 end
-
 local function new(class, props)
     local inst = Instance.new(class)
     if props then
         local fontVal = props.Font
         local fontFaceVal = props.FontFace
         local parentVal = props.Parent
-        
         for k, v in pairs(props) do
             if k ~= "Font" and k ~= "FontFace" and k ~= "Parent" then
                 inst[k] = v
@@ -128,6 +143,10 @@ function Library:Cleanup()
         pcall(function() task.cancel(self._saveThread) end)
         self._saveThread = nil
     end
+    if self._initWatchdog then
+        pcall(function() task.cancel(self._initWatchdog) end)
+        self._initWatchdog = nil
+    end
     if CallbackRegistry then
         for k in pairs(CallbackRegistry) do
             CallbackRegistry[k] = nil
@@ -163,12 +182,6 @@ local function DeepCopy(original, _seen)
         copy[DeepCopy(k, _seen)] = DeepCopy(v, _seen)
     end
     return copy
-end
-local function shallowCopyArray(t)
-    if type(t) ~= "table" then return {} end
-    local c = {}
-    for _, v in ipairs(t) do c[#c + 1] = v end
-    return c
 end
 local function MergeTables(target, source)
     for k, v in pairs(source) do
@@ -261,6 +274,9 @@ local function MarkDirty()
 end
 local function RegisterCallback(configPath, callback, componentType, defaultValue, updateVisualFn)
     if not configPath then return end
+    if CallbackRegistry[configPath] then
+        warn(("[LynxGUI] Judul komponen duplikat -> config path '%s' dipakai lebih dari sekali. Nilai config akan saling menimpa; pakai judul yang unik."):format(tostring(configPath)))
+    end
     CallbackRegistry[configPath] = {
         path         = configPath,
         callback     = callback,
@@ -269,34 +285,31 @@ local function RegisterCallback(configPath, callback, componentType, defaultValu
         updateVisual = updateVisualFn,
     }
 end
-
+local function safeInvoke(context, fn, value)
+    local ok, err = pcall(fn, value)
+    if not ok then
+        warn(("[LynxGUI] %s error: %s"):format(context, tostring(err)))
+    end
+    return ok
+end
 local function ExecuteConfigCallbacks()
-    -- Phase 1: restore visual state for ALL components tanpa menjalankan
-    -- action callback. Ini memastikan tampilan UI sinkron duluan.
     for _, entry in pairs(CallbackRegistry) do
         if entry.updateVisual then
             local value = Library.ConfigSystem.Get(entry.path, entry.default)
-            pcall(entry.updateVisual, value)
+            safeInvoke("updateVisual @" .. tostring(entry.path), entry.updateVisual, value)
         end
     end
-    -- Phase 2a: jalankan callback non-toggle (dropdown, input, dll) duluan.
-    -- Ini memastikan semua nilai filter/pilihan dropdown sudah terisi
-    -- SEBELUM callback toggle berjalan.
-    for _, entry in pairs(CallbackRegistry) do
-        if entry.callback and entry.type ~= "toggle" then
-            local value = Library.ConfigSystem.Get(entry.path, entry.default)
-            pcall(entry.callback, value)
+    local function runCallbacks(wantToggle)
+        for _, entry in pairs(CallbackRegistry) do
+            local isToggle = entry.type == "toggle"
+            if entry.callback and isToggle == wantToggle then
+                local value = Library.ConfigSystem.Get(entry.path, entry.default)
+                safeInvoke("callback @" .. tostring(entry.path), entry.callback, value)
+            end
         end
     end
-    -- Phase 2b: setelah semua nilai dropdown sudah tersimpan di flags,
-    -- baru jalankan callback toggle. Toggle yang membaca dropdown
-    -- akan mendapatkan nilai yang sudah benar.
-    for _, entry in pairs(CallbackRegistry) do
-        if entry.callback and entry.type == "toggle" then
-            local value = Library.ConfigSystem.Get(entry.path, entry.default)
-            pcall(entry.callback, value)
-        end
-    end
+    runCallbacks(false)
+    runCallbacks(true)
 end
 _G.AutoSaveEnabled = true
 function _G.GetConfigValue(key, default)
@@ -677,18 +690,27 @@ function Library:CreateWindow(config)
             Visible = icon.Image == "",
             ZIndex = 51
         })
-        local iconConns = {}
+        local iconConns = {}       -- koneksi tetap (event pada instance ikon)
+        local iconDragConns = {}   -- koneksi UIS global; HANYA hidup selama drag
         local iconDragging = false
         local iconDragStart = nil
         local iconStartPos = nil
         local iconDragMoved = false
         local dragThreshold = 6
-        local function disconnectIconConns()
-            for i = #iconConns, 1, -1 do
-                local c = iconConns[i]
-                iconConns[i] = nil
+        local function disconnectList(list)
+            for i = #list, 1, -1 do
+                local c = list[i]
+                list[i] = nil
                 pcall(function() c:Disconnect() end)
             end
+        end
+        local function stopIconDrag()
+            iconDragging = false
+            disconnectList(iconDragConns)
+        end
+        local function disconnectIconConns()
+            stopIconDrag()
+            disconnectList(iconConns)
         end
         local function restoreFromIcon()
             if not icon then return end
@@ -701,38 +723,43 @@ function Library:CreateWindow(config)
             icon = nil
             minimized = false
         end
-        iconConns[#iconConns + 1] = icon.InputBegan:Connect(function(input)
+        local function beginIconDrag(input)
             if iconDragging then return end
-            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-                iconDragging = true
-                iconDragMoved = false
-                iconDragStart = input.Position
-                iconStartPos = icon.Position
-            end
-        end)
-        iconConns[#iconConns + 1] = UserInputService.InputChanged:Connect(function(input)
-            if not iconDragging or not icon or not icon.Parent or not iconStartPos or not iconDragStart then return end
-            if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-                local delta = input.Position - iconDragStart
-                if delta.Magnitude > dragThreshold then
-                    iconDragMoved = true
+            iconDragging = true
+            iconDragMoved = false
+            iconDragStart = input.Position
+            iconStartPos = icon.Position
+            iconDragConns[#iconDragConns + 1] = UserInputService.InputChanged:Connect(function(moveInput)
+                if not iconDragging or not icon or not icon.Parent or not iconStartPos or not iconDragStart then return end
+                if moveInput.UserInputType == Enum.UserInputType.MouseMovement or moveInput.UserInputType == Enum.UserInputType.Touch then
+                    local delta = moveInput.Position - iconDragStart
+                    if delta.Magnitude > dragThreshold then
+                        iconDragMoved = true
+                    end
+                    icon.Position = UDim2.new(
+                        iconStartPos.X.Scale, iconStartPos.X.Offset + delta.X,
+                        iconStartPos.Y.Scale, iconStartPos.Y.Offset + delta.Y
+                    )
                 end
-                icon.Position = UDim2.new(
-                    iconStartPos.X.Scale, iconStartPos.X.Offset + delta.X,
-                    iconStartPos.Y.Scale, iconStartPos.Y.Offset + delta.Y
-                )
-            end
-        end)
-        iconConns[#iconConns + 1] = UserInputService.InputEnded:Connect(function(input)
-            if not iconDragging then return end
-            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-                iconDragging = false
-                if icon and icon.Parent then
-                    savedIconPos = icon.Position
-                    if not iconDragMoved then
+            end)
+            iconDragConns[#iconDragConns + 1] = UserInputService.InputEnded:Connect(function(endInput)
+                if not iconDragging then return end
+                if endInput.UserInputType == Enum.UserInputType.MouseButton1 or endInput.UserInputType == Enum.UserInputType.Touch then
+                    local moved = iconDragMoved
+                    local stillHasIcon = icon and icon.Parent
+                    if stillHasIcon then
+                        savedIconPos = icon.Position
+                    end
+                    stopIconDrag()
+                    if stillHasIcon and not moved then
                         restoreFromIcon()
                     end
                 end
+            end)
+        end
+        iconConns[#iconConns + 1] = icon.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                beginIconDrag(input)
             end
         end)
         icon.Destroying:Connect(disconnectIconConns)
@@ -751,19 +778,7 @@ function Library:CreateWindow(config)
     local dragging, dragStart, startPos = false, nil, nil
     local resizing = false
     local resizeStartPos, resizeStartSize = nil, nil
-    -- Drag/resize EVENT-DRIVEN murni: Position/Size ditulis HANYA saat input
-    -- bener-baker berubah (InputChanged), bukan tiap render frame. Tidak ada
-    -- RenderStepped, lerp, atau loop per-frame apa pun -> yang paling ringan
-    -- secara engine. Setiap perubahan Position memicu engine re-layout UI tree
-    -- descendant, jadi minimalkan jumlah tulis = FPS paling stabil.
-    -- (Note: transparansi dipertahankan permanen -- terbukti BUKAN penyebab
-    -- FPS drop; penyebabnya adalah render invalidation per-property-change.)
     local win = self._win
-    -- Threshold delta: di Delta mobile, InputChanged sering fire dengan posisi
-    -- sub-pixel yang nyaris sama (noise touch). Tiap write Position/Size = engine
-    -- re-layout seluruh descendant UI -> mahal. Skip write kalau gerakan <1px
-    -- dari posisi terakhir yang ditulis -> hemat refresh sia-sia, nol perubahan
-    -- visual. lastX/lastY cache posisi terakhir biar gak baca win.Position tiap event.
     local lastX, lastY = nil, nil
     local function onMove(input)
         if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
@@ -802,21 +817,18 @@ function Library:CreateWindow(config)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             bringToFront()
             dragging, dragStart, startPos = true, input.Position, self._win.Position
-            lastX, lastY = nil, nil -- reset threshold cache per sesi drag
+            lastX, lastY = nil, nil 
             ensureMoveConn()
         end
     end))
     self:AddConnection("resizeDragStart", resizeHandle.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             resizing, resizeStartPos, resizeStartSize = true, input.Position, self._win.Size
-            lastX, lastY = nil, nil -- reset threshold cache per sesi resize
+            lastX, lastY = nil, nil 
             ensureMoveConn()
         end
     end))
     self:AddConnection("inputEnded", UserInputService.InputEnded:Connect(function(input)
-        -- InputEnded fires pada setiap input globally. Saat tidak ada drag/resize
-        -- aktif, tidak ada yang harus dilakukan -- keluar lebih awal supaya tidak
-        -- menjalankan dua assignment + pemanggilan fungsi untuk setiap input idle.
         if not dragging and not resizing then return end
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging = false
@@ -947,10 +959,6 @@ function Library:_createSearchBar()
         Visible = false,
         ZIndex = 62
     })
-    -- Pool of result rows: reused across searches instead of being destroyed and
-    -- rebuilt on every keystroke. Unused rows are just hidden (UIListLayout skips
-    -- invisible siblings), which avoids instance churn / GC pressure on low-end
-    -- and mobile devices.
     local rowPool = {}
     local searchThread = nil
     local function highlightFeature(frame)
@@ -1102,8 +1110,6 @@ function Library:_createSearchBar()
         resultsPanel.Size = UDim2.new(0, searchW, 0, panelH)
         resultsPanel.Visible = true
     end
-    -- Debounce: rebuild results only after typing pauses briefly, so holding/
-    -- spamming keys on a low-end device doesn't rebuild the list every keystroke.
     self:AddConnection("searchTextChanged", searchBox:GetPropertyChangedSignal("Text"):Connect(function()
         local text = searchBox.Text
         if searchThread then
@@ -1312,45 +1318,28 @@ function Library:CreateCategory(parent, title, startOpen)
     local contentListLayout = new("UIListLayout", {Parent = contentContainer, Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder})
     local isOpen = startOpen
     arrow.Rotation = startOpen and 180 or 0
-
-    -- Background the section frame manually instead of relying on AutomaticSize.
-    -- A Frame whose height is driven by AutomaticSize inside a ScrollingFrame
-    -- does not reliably repaint its background when a child's Visible toggles,
-    -- so the section bg only appears after a scroll/layout pass is forced. We
-    -- compute the height from the content list's AbsoluteContentSize and update
-    -- it on content change and on open/close, which keeps the bg correct at all
-    -- times without needing the user to scroll first.
     local function updateCategoryHeight()
         if not categoryFrame or not categoryFrame.Parent then return end
         local h = sectionHeaderHeight
         if isOpen and contentContainer.Visible then
-            -- +6 accounts for the UIPadding PaddingBottom on contentContainer
-            -- so the bottom element is never clipped by the background frame.
             h = sectionHeaderHeight + contentListLayout.AbsoluteContentSize.Y + 6
         end
         categoryFrame.Size = UDim2.new(1, 0, 0, h)
     end
-
     local function setOpen(state)
         isOpen = state
         contentContainer.Visible = isOpen
         arrow.Rotation = isOpen and 180 or 0
         updateCategoryHeight()
     end
-
     contentListLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateCategoryHeight)
-    -- Defer once so the initial size is set after the layout settles, covering
-    -- any content that was added before this connect fired.
     task.defer(updateCategoryHeight)
-
     header.MouseButton1Click:Connect(function()
         setOpen(not isOpen)
     end)
-
     local function expand()
         if not isOpen then setOpen(true) end
     end
-
     return contentContainer, expand
 end
 function Library:CreateToggle(parent, label, configPath, callback, disableSave, defaultValue)
@@ -1423,12 +1412,9 @@ function Library:CreateToggle(parent, label, configPath, callback, disableSave, 
                 MarkDirty()
             end
             Library.flags[configPath or label] = on
-            -- Memanggil callback agar fitur berjalan ketika SetValue dipanggil dari luar
-            if callback then callback(on) end
         end,
         get = function() return on end
     }
-    Library.Toggles[label] = toggleController
     return toggleController
 end
 Library._dropdownOverlay = nil
@@ -1523,7 +1509,6 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
     self:_initDropdownSystem()
     local dropdownLayoutOrder = self._dropdownCount
     self._dropdownCount = self._dropdownCount + 1
-    
     local dropdownFrame = new("Frame", {
         Parent = parent,
         Size = UDim2.new(1, 0, 0, 28),
@@ -1532,7 +1517,6 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
         ZIndex = 7,
         Name = uniqueId or (isMulti and "MultiDropdown" or "Dropdown")
     })
-    
     local dropdownButton = new("TextButton", {
         Parent = dropdownFrame,
         Text = "",
@@ -1540,7 +1524,6 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
         Size = UDim2.new(1, 0, 1, 0),
         ZIndex = 8
     })
-    
     local dropdownTitle = new("TextLabel", {
         Parent = dropdownFrame,
         Font = Enum.Font.GothamBold,
@@ -1553,7 +1536,6 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
         Size = UDim2.new(0.5, 0, 1, 0),
         ZIndex = 8
     })
-    
     local selectFrame = new("Frame", {
         Parent = dropdownFrame,
         AnchorPoint = Vector2.new(1, 0.5),
@@ -1566,7 +1548,6 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
     })
     new("UICorner", {Parent = selectFrame, CornerRadius = UDim.new(0, 4)})
     new("UIStroke", {Parent = selectFrame, Color = colors.border, Thickness = 1, Transparency = 0.5})
-    
     local defaultText = isMulti and "Select Options" or "Select Option"
     local optionLabel = new("TextLabel", {
         Parent = selectFrame,
@@ -1582,7 +1563,6 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
         Size = UDim2.new(1, -24, 1, 0),
         ZIndex = 9
     })
-    
     new("ImageLabel", {
         Parent = selectFrame,
         Image = "rbxassetid://6031091004",
@@ -1593,14 +1573,12 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
         Size = UDim2.new(0, 11, 0, 11),
         ZIndex = 9
     })
-    
     local dropdownContainer = new("Frame", {
         Parent = self._dropdownFolder,
         Size = UDim2.new(1, 0, 1, 0),
         BackgroundTransparency = 1,
         LayoutOrder = dropdownLayoutOrder
     })
-    
     local searchBox = new("TextBox", {
         Parent = dropdownContainer,
         PlaceholderText = "Search...",
@@ -1620,11 +1598,10 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
     new("UICorner", {Parent = searchBox, CornerRadius = UDim.new(0, 4)})
     new("UIStroke", {Parent = searchBox, Color = colors.border, Thickness = 1, Transparency = 0.5})
     new("UIPadding", {Parent = searchBox, PaddingLeft = UDim.new(0, 8)})
-    
     local ROW_H, ROW_GAP = 26, 3
     local ROW_STRIDE = ROW_H + ROW_GAP
-    local POOL_SIZE = 18
-
+    local MIN_POOL = 12
+    local MAX_POOL = 48   -- batas aman; jauh di atas kapasitas layar terbesar
     local scrollSelect = new("ScrollingFrame", {
         Parent = dropdownContainer,
         Size = UDim2.new(1, -8, 1, -36),
@@ -1635,20 +1612,20 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
         CanvasSize = UDim2.new(0, 0, 0, 0),
         ZIndex = 154
     })
-
-    local savedValue
-    if configPath then
-        local fromConfig = Library.ConfigSystem.Get(configPath, nil)
-        if fromConfig ~= nil then
-            savedValue = isMulti and shallowCopyArray(fromConfig) or fromConfig
-        else
-            savedValue = isMulti and shallowCopyArray(defaultValue) or defaultValue
+    -- Untuk multi-select, Value adalah tabel milik dropdown ini sendiri (BUKAN referensi
+    -- ke config atau ke tabel Default milik user). copyValue menjamin kita tak pernah
+    -- berbagi referensi, jadi tidak ada mutasi tak sengaja ke config/Default/konsumen.
+    local function copyValue(v)
+        if isMulti then
+            local out = {}
+            if type(v) == "table" then
+                for i = 1, #v do out[i] = v[i] end
+            end
+            return out
         end
-    else
-        savedValue = isMulti and shallowCopyArray(defaultValue) or defaultValue
+        return v
     end
-    if isMulti and type(savedValue) ~= "table" then savedValue = {} end
-
+    local savedValue = copyValue(configPath and Library.ConfigSystem.Get(configPath, defaultValue) or defaultValue)
     local DropdownFunc = { Value = savedValue, Options = items }
     local allOptions = {}
     local filteredOptions = {}
@@ -1659,7 +1636,6 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
     local needsRefresh = false
     local poolBuilt = false
     local optionsNormalized = false
-
     local function rebuildSelectedSet()
         table.clear(selectedSet)
         if isMulti then
@@ -1670,7 +1646,6 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
             selectedSet[DropdownFunc.Value] = true
         end
     end
-
     local function normalizeListInto(srcList, dstList)
         table.clear(dstList)
         for _, opt in ipairs(srcList) do
@@ -1687,7 +1662,6 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
             }
         end
     end
-
     local function applyFilter(query)
         if not query or query == "" then
             for i = 1, #allOptions do
@@ -1705,14 +1679,12 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
             end
         end
     end
-
     local function ensureOptionsNormalized()
         if optionsNormalized then return end
         optionsNormalized = true
         normalizeListInto(items, allOptions)
         applyFilter("")
     end
-
     local function updateClosedLabel()
         ensureOptionsNormalized()
         if isMulti then
@@ -1747,7 +1719,6 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
             end
         end
     end
-
     local function paintRow(row, opt)
         local selected = selectedSet[opt.value] == true
         if selected then
@@ -1763,47 +1734,7 @@ function Library:_createBaseDropdown(parent, title, imageId, items, configPath, 
         end
         row.OptionText.Text = opt.label
     end
-
-    local function refreshVisible()
-        if not poolBuilt then return end
-        local list = filteredOptions
-        local total = #list
-        local viewH = scrollSelect.AbsoluteSize.Y
-        if viewH <= 0 then needsRefresh = true return end
-        needsRefresh = false
-
-        local canvasH = total * ROW_STRIDE
-        if total > 0 then canvasH = canvasH - ROW_GAP end
-        scrollSelect.CanvasSize = UDim2.new(0, 0, 0, canvasH)
-
-        local scrollY = scrollSelect.CanvasPosition.Y
-        local firstVisible = math.floor(scrollY / ROW_STRIDE) + 1
-        if firstVisible < 1 then firstVisible = 1 end
-        local maxVisible = math.floor(viewH / ROW_STRIDE) + 2
-        local lastVisible = math.min(total, firstVisible + maxVisible - 1)
-
-    for i = 1, #rowPool do
-        local row = rowPool[i]
-        local optIndex = firstVisible + i - 1
-        if optIndex <= lastVisible then
-            local opt = list[optIndex]
-            row.Position = UDim2.new(0, 0, 0, (optIndex - 1) * ROW_STRIDE)
-            paintRow(row, opt)
-            row:SetAttribute("VirtualIndex", optIndex)
-            row.Visible = true
-        else
-            row.Visible = false
-            row:SetAttribute("VirtualIndex", nil)
-        end
-    end
-end
-
-local function ensurePoolBuilt()
-    if poolBuilt then return end
-    poolBuilt = true
-    ensureOptionsNormalized()
-
-    for i = 1, POOL_SIZE do
+    local function buildOneRow(i)
         local row = new("Frame", {
             Parent = scrollSelect,
             BackgroundColor3 = colors.bg2,
@@ -1864,32 +1795,82 @@ local function ensurePoolBuilt()
             if not opt then return end
             local value = opt.value
             if isMulti then
-                local idx = table.find(DropdownFunc.Value, value)
-                if not idx then
-                    table.insert(DropdownFunc.Value, value)
-                else
-                    table.remove(DropdownFunc.Value, idx)
+                -- bangun array baru (jangan mutasi in-place -> hindari berbagi referensi)
+                local newList = {}
+                local removed = false
+                for _, v in ipairs(DropdownFunc.Value) do
+                    if v == value then
+                        removed = true
+                    else
+                        newList[#newList + 1] = v
+                    end
                 end
-                rebuildSelectedSet()
-                DropdownFunc:Set(DropdownFunc.Value)
+                if not removed then
+                    newList[#newList + 1] = value
+                end
+                DropdownFunc:Set(newList)
             else
-                DropdownFunc.Value = value
-                rebuildSelectedSet()
-                DropdownFunc:Set(DropdownFunc.Value)
+                DropdownFunc:Set(value)
             end
         end)
         rowPool[i] = row
+        return row
     end
-
-    self:AddConnection("dropdownScroll_" .. dropdownLayoutOrder, scrollSelect:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
-        refreshVisible()
-    end))
-
-    self:AddConnection("dropdownResize_" .. dropdownLayoutOrder, scrollSelect:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
-        if isOpen then refreshVisible() end
-    end))
-end
-
+    local function growPoolTo(target)
+        if target > MAX_POOL then target = MAX_POOL end
+        for i = #rowPool + 1, target do
+            buildOneRow(i)
+        end
+    end
+    local function refreshVisible()
+        if not poolBuilt then return end
+        local list = filteredOptions
+        local total = #list
+        local viewH = scrollSelect.AbsoluteSize.Y
+        if viewH <= 0 then needsRefresh = true return end
+        needsRefresh = false
+        local canvasH = total * ROW_STRIDE
+        if total > 0 then canvasH = canvasH - ROW_GAP end
+        scrollSelect.CanvasSize = UDim2.new(0, 0, 0, canvasH)
+        local scrollY = scrollSelect.CanvasPosition.Y
+        local firstVisible = math.floor(scrollY / ROW_STRIDE) + 1
+        if firstVisible < 1 then firstVisible = 1 end
+        local maxVisible = math.floor(viewH / ROW_STRIDE) + 2
+        -- pastikan pool cukup mengisi seluruh viewport (window bisa di-resize jadi besar)
+        if maxVisible > #rowPool then growPoolTo(maxVisible) end
+        local lastVisible = math.min(total, firstVisible + maxVisible - 1)
+        for i = 1, #rowPool do
+            local row = rowPool[i]
+            local optIndex = firstVisible + i - 1
+            if optIndex <= lastVisible then
+                local opt = list[optIndex]
+                row.Position = UDim2.new(0, 0, 0, (optIndex - 1) * ROW_STRIDE)
+                paintRow(row, opt)
+                row:SetAttribute("VirtualIndex", optIndex)
+                row.Visible = true
+            else
+                row.Visible = false
+                row:SetAttribute("VirtualIndex", nil)
+            end
+        end
+    end
+    local function ensurePoolBuilt()
+        if poolBuilt then return end
+        poolBuilt = true
+        ensureOptionsNormalized()
+        local viewH = scrollSelect.AbsoluteSize.Y
+        local initial = MIN_POOL
+        if viewH > 0 then
+            initial = math.max(MIN_POOL, math.floor(viewH / ROW_STRIDE) + 2)
+        end
+        growPoolTo(initial)
+        self:AddConnection("dropdownScroll_" .. dropdownLayoutOrder, scrollSelect:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+            refreshVisible()
+        end))
+        self:AddConnection("dropdownResize_" .. dropdownLayoutOrder, scrollSelect:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+            if isOpen then refreshVisible() end
+        end))
+    end
 function DropdownFunc:Clear()
         allOptions = {}
         filteredOptions = {}
@@ -1900,7 +1881,6 @@ function DropdownFunc:Clear()
         scrollSelect.CanvasPosition = Vector2.new(0, 0)
         refreshVisible()
     end
-
     function DropdownFunc:AddOption(option)
         local label, value
         if typeof(option) == "table" and option.Label and option.Value ~= nil then
@@ -1917,31 +1897,26 @@ function DropdownFunc:Clear()
             filteredOptions[#filteredOptions + 1] = allOptions[#allOptions]
         end
     end
-
     function DropdownFunc:Set(Value)
-        if isMulti then
-            Value = shallowCopyArray(Value)
-        end
-        DropdownFunc.Value = Value
+        local stored = copyValue(Value)          -- salinan internal milik dropdown
+        DropdownFunc.Value = stored
         rebuildSelectedSet()
         if configPath then
-            Library.ConfigSystem.Set(configPath, Value)
+            Library.ConfigSystem.Set(configPath, copyValue(stored))   -- salinan terpisah untuk config
             MarkDirty()
         end
         updateClosedLabel()
         if isOpen then refreshVisible() end
         if onSelect then
             if isMulti then
-                onSelect(DropdownFunc.Value)
+                onSelect(copyValue(stored))       -- kirim salinan ke konsumen
             else
-                onSelect((DropdownFunc.Value ~= nil) and tostring(DropdownFunc.Value) or "")
+                onSelect((stored ~= nil) and tostring(stored) or "")
             end
         end
     end
-
     function DropdownFunc:SetValue(val) self:Set(val) end
-    function DropdownFunc:GetValue() return self.Value end
-
+    function DropdownFunc:GetValue() return copyValue(self.Value) end
     function DropdownFunc:SetValues(newList, selecting)
         newList = newList or {}
         items = newList
@@ -1949,16 +1924,9 @@ function DropdownFunc:Clear()
         normalizeListInto(newList, allOptions)
         DropdownFunc.Options = newList
         if isMulti then
-            DropdownFunc.Value = {}
+            DropdownFunc.Value = (type(selecting) == "table") and copyValue(selecting) or {}
         else
-            DropdownFunc.Value = nil
-        end
-        if selecting ~= nil then
-            if isMulti and type(selecting) == "table" then
-                DropdownFunc.Value = shallowCopyArray(selecting)
-            elseif not isMulti then
-                DropdownFunc.Value = selecting
-            end
+            DropdownFunc.Value = (selecting ~= nil) and selecting or nil
         end
         rebuildSelectedSet()
         applyFilter(string.lower(searchBox.Text or ""))
@@ -1967,13 +1935,12 @@ function DropdownFunc:Clear()
         refreshVisible()
         if onSelect then
             if isMulti then
-                onSelect(DropdownFunc.Value)
+                onSelect(copyValue(DropdownFunc.Value))
             else
                 onSelect((DropdownFunc.Value ~= nil) and tostring(DropdownFunc.Value) or "")
             end
         end
     end
-
     function DropdownFunc:Refresh(newList)
         local prevValue = DropdownFunc.Value
         items = newList
@@ -2010,11 +1977,10 @@ function DropdownFunc:Clear()
         updateClosedLabel()
         if isOpen then refreshVisible() end
         if configPath then
-            Library.ConfigSystem.Set(configPath, DropdownFunc.Value)
+            Library.ConfigSystem.Set(configPath, copyValue(DropdownFunc.Value))
             MarkDirty()
         end
     end
-
     self:AddConnection("searchBox_" .. dropdownLayoutOrder, searchBox:GetPropertyChangedSignal("Text"):Connect(function()
         if searchThread then
             pcall(function() task.cancel(searchThread) end)
@@ -2033,7 +1999,6 @@ function DropdownFunc:Clear()
             refreshVisible()
         end)
     end))
-
     self:AddConnection("dropdownOpen_" .. dropdownLayoutOrder, dropdownButton.Activated:Connect(function()
         ensurePoolBuilt()
         searchBox.Text = ""
@@ -2048,43 +2013,43 @@ function DropdownFunc:Clear()
             end
         end)
     end))
-
     self:AddConnection("dropdownOverlayClose_" .. dropdownLayoutOrder, self._dropdownOverlay:GetPropertyChangedSignal("Visible"):Connect(function()
         if not self._dropdownOverlay.Visible and isOpen then
             isOpen = false
         end
     end))
-
     rebuildSelectedSet()
     updateClosedLabel()
-
     if configPath then
         local cbType = isMulti and "multidropdown" or "dropdown"
         local cbDef = isMulti and (defaultValue or {}) or defaultValue
-        RegisterCallback(configPath, onSelect, cbType, cbDef, function(val)
-            if isMulti then val = shallowCopyArray(val) end
-            DropdownFunc.Value = val
+        -- bungkus onSelect supaya saat :Init() konsumen menerima nilai yang konsisten
+        -- dengan pemanggilan runtime (salinan array untuk multi, string untuk single).
+        local wrappedSelect = onSelect and function(val)
+            if isMulti then
+                onSelect(copyValue(val))
+            else
+                onSelect((val ~= nil) and tostring(val) or "")
+            end
+        end
+        RegisterCallback(configPath, wrappedSelect, cbType, cbDef, function(val)
+            DropdownFunc.Value = copyValue(val)
             rebuildSelectedSet()
             updateClosedLabel()
             if isOpen then refreshVisible() end
         end)
     end
-    
     if uniqueId then
         self.flags[uniqueId] = DropdownFunc
     end
-    
     return dropdownFrame
 end
-
 function Library:CreateDropdown(parent, title, imageId, items, configPath, onSelect, uniqueId, defaultValue)
     return self:_createBaseDropdown(parent, title, imageId, items, configPath, onSelect, uniqueId, defaultValue, false)
 end
-
 function Library:CreateMultiDropdown(parent, title, imageId, items, configPath, onSelect, uniqueId, defaultValues)
     return self:_createBaseDropdown(parent, title, imageId, items, configPath, onSelect, uniqueId, defaultValues, true)
 end
-
 function Library:CreateInput(parent, label, configPath, defaultValue, callback)
     local frame = new("Frame", {Parent = parent, Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, ZIndex = 7})
     new("TextLabel", {
@@ -2126,13 +2091,17 @@ function Library:CreateInput(parent, label, configPath, defaultValue, callback)
         ZIndex = 9
     })
     local function resolveValue(text)
-        -- Don't convert long numbers (like Discord IDs) to number type
-        -- Lua numbers lose precision for IDs longer than 15 digits
         if type(text) == "string" and #text > 15 and text:match("^%d+$") then
-            return text  -- Keep as string for long numeric IDs
+            return text  
         end
         local num = tonumber(text)
         return num or text
+    end
+    local function fireCallback(rawVal)
+        if not callback then return end
+        local v = rawVal
+        if v == nil then v = "" end
+        callback(resolveValue(v))
     end
     self:AddConnection("input_" .. label .. tostring(inputBox), inputBox.FocusLost:Connect(function()
         local rawValue = inputBox.Text
@@ -2143,12 +2112,15 @@ function Library:CreateInput(parent, label, configPath, defaultValue, callback)
         end
         if callback then callback(value) end
     end))
-    RegisterCallback(configPath, callback, "input", defaultValue, function(val)
-        inputBox.Text = tostring(val ~= nil and val or defaultValue or "")
-    end)
-    if callback then
-        local resolved = resolveValue(tostring(initialValue))
-        callback(resolved)
+    if configPath then
+        -- Input tersimpan: callback dijalankan sekali saat Library:Init() (bukan saat create)
+        -- supaya tidak double-fire & konsisten dengan toggle/dropdown.
+        RegisterCallback(configPath, function(val) fireCallback(val) end, "input", defaultValue, function(val)
+            inputBox.Text = tostring(val ~= nil and val or defaultValue or "")
+        end)
+    else
+        -- Input NoSave: tidak ikut :Init(), jadi jalankan callback sekali dari nilai default.
+        fireCallback(initialValue)
     end
     return frame
 end
@@ -2170,52 +2142,45 @@ function Library:CreateButton(parent, label, callback)
         Font = Enum.Font.GothamBold,
         TextSize = fontSize.normal,
         TextColor3 = colors.text,
-        -- AutoButtonColor (API lama/universal) otomatis menggelapkan tombol saat
-        -- ditekan, jadi tidak butuh 3 connection Lua (Down/Up/Leave) hanya untuk
-        -- feedback warna. Warna dipindah dari btnFrame ke button supaya efek
-        -- tekan benar-benar terlihat. (AutoButtonColorProperties tidak dipakai
-        -- karena belum didukung semua executor.)
         AutoButtonColor = true,
         ZIndex = 9
     })
     new("UICorner", {Parent = button, CornerRadius = UDim.new(0, 5)})
-
     local isClicking = false
-
     self:AddConnection("btn_click_" .. label .. tostring(button), button.MouseButton1Click:Connect(function()
         if isClicking then return end
         isClicking = true
-
-        -- Jalankan callback di thread terpisah agar tidak membekukan UI
         if callback then
             task.spawn(function()
                 pcall(callback)
             end)
         end
-
-        -- Anti-spam klik cepat
         task.delay(0.1, function()
             isClicking = false
         end)
     end))
-    
     return btnFrame
 end
-
 function Library:Init()
     self:Initialize()
 end
-
 function Library:Initialize()
     if self._initialized then return end
     self._initialized = true
-    ExecuteConfigCallbacks()
+    if self._initWatchdog then
+        pcall(function() task.cancel(self._initWatchdog) end)
+        self._initWatchdog = nil
+    end
+    -- Buat Config tab lebih dulu agar komponennya terdaftar sebelum aktivasi callback.
     if self._pendingWindowObj then
         pcall(function()
             self:_createConfigTab(self._pendingWindowObj)
         end)
         self._pendingWindowObj = nil
     end
+    -- Aktifkan semua fitur sesuai nilai config, tepat sekali. Error callback dilaporkan
+    -- lewat warn (tidak ditelan diam-diam) sehingga tidak ada "visual ON tapi fitur OFF".
+    ExecuteConfigCallbacks()
     self:AddConnection("playerRemoving", Players.PlayerRemoving:Connect(function(plr)
         if plr == localPlayer then
             if Library._saveThread then
@@ -2227,7 +2192,6 @@ function Library:Initialize()
         end
     end))
 end
-
 function Library:MakeNotify(config)
     config = config or {}
     local title   = config.Title or "Notification"
@@ -2317,7 +2281,6 @@ function Library:MakeNotify(config)
         end
     end)
 end
-
 function Library:_createConfigTab(WindowObject)
     local configTab = WindowObject:AddTab({ Name = "Config", Icon = "loop" })
     local autoSaveSection = configTab:AddSection("Auto Save")
@@ -2334,11 +2297,7 @@ function Library:_createConfigTab(WindowObject)
             })
         end,
     })
-
     local mgmtSection = configTab:AddSection("Config Management")
-    -- Warna tombol sekarang disimpan di child TextButton (lihat CreateButton),
-    -- bukan di frame-nya. Helper ini menargetkan child tsb saat ganti warna
-    -- konfirmasi reset/delete.
     local function setBtnColor(frame, color)
         local btn = frame:FindFirstChildWhichIsA("TextButton")
         if btn then btn.BackgroundColor3 = color end
@@ -2355,7 +2314,6 @@ function Library:_createConfigTab(WindowObject)
             })
         end,
     })
-
     local resetConfirm = false
     local resetThread  = nil
     local resetBtnFrame
@@ -2432,7 +2390,6 @@ function Library:_createConfigTab(WindowObject)
         end
     })
 end
-
 function Library:Window(config)
     config = config or {}
     self:CreateWindow({
@@ -2447,7 +2404,16 @@ function Library:Window(config)
     WindowObject._tabOrder = 0
     Library._initialized = false
     Library._pendingWindowObj = WindowObject
-
+    -- Watchdog: ingatkan kalau lupa memanggil Library:Init() di baris paling bawah script.
+    if Library._initWatchdog then
+        pcall(function() task.cancel(Library._initWatchdog) end)
+    end
+    Library._initWatchdog = task.delay(6, function()
+        Library._initWatchdog = nil
+        if not Library._initialized then
+            warn("[LynxGUI] Library:Init() belum dipanggil. Tambahkan 'Library:Init()' di baris paling bawah script supaya toggle/dropdown/input yang ON dari config benar-benar menjalankan fiturnya (bukan cuma tampil ON).")
+        end
+    end)
     function WindowObject:AddTab(tabConfig)
         tabConfig = tabConfig or {}
         local tabName = tabConfig.Name or "Tab"
@@ -2544,85 +2510,83 @@ function Library:Window(config)
                 function toggleObj:SetValue(val)
                     self._value = val
                     if toggleResult and toggleResult.set then
-                        -- set() sekarang sudah memanggil callback,
-                        -- jadi tidak perlu panggil callback lagi di sini
                         toggleResult.set(val)
                     end
+                    if callback then callback(val) end
                 end
                 function toggleObj:GetValue()
-                    -- Baca dari toggleResult.get() agar selalu sinkron
-                    -- dengan state visual internal (bukan dari _value yang bisa stale)
-                    if toggleResult and toggleResult.get then
-                        return toggleResult.get()
-                    end
                     return self._value
                 end
                 return toggleObj
             end
             function SectionObject:AddDropdown(dropdownConfig)
                 dropdownConfig = dropdownConfig or {}
-                local title    = dropdownConfig.Title or "Dropdown"
-                local options  = dropdownConfig.Options or {}
-                local default  = dropdownConfig.Default
-                local callback = dropdownConfig.Callback
-                local noSave   = dropdownConfig.NoSave or false
-                local isMulti  = dropdownConfig.Multi or false
-                local refreshToggle = dropdownConfig.RefreshToggle
+                local title      = dropdownConfig.Title or "Dropdown"
+                local options    = dropdownConfig.Options or {}
+                local default    = dropdownConfig.Default
+                local callback   = dropdownConfig.Callback
+                local noSave     = dropdownConfig.NoSave or false
+                local isMulti    = dropdownConfig.Multi or false
                 local configPath = noSave and nil or ((isMulti and "MultiDropdowns." or "Dropdowns.") .. title:gsub("%s+", "_"))
                 local uniqueId   = title:gsub("%s+", "_")
-                -- Simpan default ke config jika belum ada
-                if default ~= nil and configPath then
-                    local current = Library.ConfigSystem.Get(configPath, nil)
-                    if current == nil then
-                        Library.ConfigSystem.Set(configPath, default)
-                    end
-                end
-                
-                local wrappedCallback = function(val)
-                    if callback then callback(val) end
-                    if refreshToggle then
-                        local tController = Library.Toggles[refreshToggle]
-                        if tController and tController.get() then
-                            task.spawn(function()
-                                tController.set(false)
-                                task.wait(0.1)
-                                tController.set(true)
-                            end)
+                if isMulti then
+                    if default and configPath then
+                        local current = Library.ConfigSystem.Get(configPath, nil)
+                        if current == nil then
+                            Library.ConfigSystem.Set(configPath, DeepCopy(default))   -- salin, jangan berbagi ref dgn Default milik user
                         end
                     end
+                    local frame = self._library:CreateMultiDropdown(self._container, title, nil, options, configPath, callback, uniqueId, default)
+                    if frame then frame.LayoutOrder = getNextLayoutOrder() end
+                    registerFeature(title, frame, "Dropdown")
+                    local flagObj0 = Library.flags[uniqueId]
+                    local dropdownObj = {
+                        _options = options,
+                        Value    = (flagObj0 and flagObj0:GetValue()) or (default or {}),
+                        SetOptions = function(self, newOptions)
+                            self._options = newOptions
+                            local flagObj = Library.flags[uniqueId]
+                            if flagObj and flagObj.Refresh then
+                                flagObj:Refresh(newOptions)
+                            end
+                        end,
+                        SetValue = function(self, val)
+                            local flagObj = Library.flags[uniqueId]
+                            if flagObj and flagObj.SetValue then
+                                pcall(function() flagObj:SetValue(val) end)
+                            end
+                            self.Value = val
+                        end,
+                        GetValue = function(self)
+                            local flagObj = Library.flags[uniqueId]
+                            if flagObj then return flagObj:GetValue() end
+                            return self.Value
+                        end,
+                    }
+                    return dropdownObj
                 end
-
-                -- Buat dropdown frame via internal API
-                local frame
-                if isMulti then
-                    frame = self._library:CreateMultiDropdown(self._container, title, nil, options, configPath, wrappedCallback, uniqueId, default)
-                else
-                    frame = self._library:CreateDropdown(self._container, title, nil, options, configPath, wrappedCallback, uniqueId, default)
+                if default and configPath then
+                    local current = Library.ConfigSystem.Get(configPath, nil)
+                    if current == nil then
+                        Library.ConfigSystem.Set(configPath, DeepCopy(default))
+                    end
                 end
+                local frame = self._library:CreateDropdown(self._container, title, nil, options, configPath, callback, uniqueId, default)
                 if frame then frame.LayoutOrder = getNextLayoutOrder() end
                 registerFeature(title, frame, "Dropdown")
-                -- Buat object ringkas yang reusable untuk dipanggil dari luar
-                local dropdownObj = {}
-                function dropdownObj:GetValue()
-                    local flagObj = Library.flags[uniqueId]
-                    return flagObj and flagObj.Value or (isMulti and {} or nil)
-                end
-                function dropdownObj:SetValue(val)
-                    local flagObj = Library.flags[uniqueId]
-                    if flagObj and flagObj.SetValue then
-                        pcall(function() flagObj:SetValue(val) end)
+                local dropdownObj = {
+                    _options = options,
+                    SetOptions = function(self, newOptions)
+                        self._options = newOptions
+                        local flagObj = Library.flags[uniqueId]
+                        if flagObj and flagObj.Refresh then
+                            flagObj:Refresh(newOptions)
+                        end
+                    end,
+                    GetOptions = function(self)
+                        return self._options
                     end
-                end
-                function dropdownObj:SetOptions(newOptions)
-                    local flagObj = Library.flags[uniqueId]
-                    if flagObj and flagObj.Refresh then
-                        flagObj:Refresh(newOptions)
-                    end
-                end
-                function dropdownObj:GetOptions()
-                    local flagObj = Library.flags[uniqueId]
-                    return flagObj and flagObj.Options or options
-                end
+                }
                 return dropdownObj
             end
             function SectionObject:AddInput(inputConfig)
@@ -2633,7 +2597,6 @@ function Library:Window(config)
                 local callback    = inputConfig.Callback
                 local noSave      = inputConfig.NoSave or false
                 local configPath  = noSave and nil or ("Inputs." .. title:gsub("%s+", "_"))
-                
                 local frame = self._library:CreateInput(self._container, title, configPath, default, callback)
                 if frame then frame.LayoutOrder = getNextLayoutOrder() end
                 registerFeature(title, frame, "Input")
@@ -2655,10 +2618,8 @@ function Library:Window(config)
                 local title   = formatRichText(paragraphConfig.Title or "")
                 local content = formatRichText(paragraphConfig.Content or "")
                 local useRich = paragraphConfig.RichText ~= false
-
                 local PADDING_V = 20
                 local GAP       = 6
-
                 local frame = new("Frame", {
                     Parent = self._container,
                     Size = UDim2.new(1, 0, 0, PADDING_V),
@@ -2681,7 +2642,6 @@ function Library:Window(config)
                     Padding = UDim.new(0, GAP),
                     SortOrder = Enum.SortOrder.LayoutOrder
                 })
-
                 local titleLabel
                 if title ~= "" then
                     titleLabel = new("TextLabel", {
@@ -2701,7 +2661,6 @@ function Library:Window(config)
                         ZIndex = 8
                     })
                 end
-
                 local contentLabel = new("TextLabel", {
                     Parent = frame,
                     Name = "ContentLabel",
@@ -2718,11 +2677,6 @@ function Library:Window(config)
                     RichText = useRich,
                     ZIndex = 8
                 })
-
-                -- Tinggi label dihitung manual dari TextBounds. AutomaticSize.Y + 
-                -- TextWrapped terbukti rapuh: sebelum wrap-width terukur, lebar
-                -- kolaps ~1 karakter sehingga teks memanjang 1 huruf per baris.
-                -- Reflow ini hanya jalan saat create/SetText, bukan hotspot per-frame.
                 local reflowPending = false
                 local function reflow()
                     if reflowPending then return end
@@ -2747,13 +2701,11 @@ function Library:Window(config)
                         frame.Size = UDim2.new(1, 0, 0, total)
                     end)
                 end
-
                 if titleLabel then
                     titleLabel:GetPropertyChangedSignal("TextBounds"):Connect(reflow)
                 end
                 contentLabel:GetPropertyChangedSignal("TextBounds"):Connect(reflow)
                 task.defer(reflow)
-
                 return {
                     _frame        = frame,
                     _titleLabel   = titleLabel,
