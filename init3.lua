@@ -1,26 +1,3 @@
---[[
-    LynxGUI (LynX) — Roblox UI Library
-    ---------------------------------------------------------------
-    Pola pemakaian:
-        local Library = loadstring(...)()          -- muat library
-        Library.ConfigSystem.SetDefaults({...})    -- (opsional) default config
-        local Window  = Library:Window({ Title = "LynX", Footer = "..." })
-        local Tab     = Window:AddTab({ Name = "Main", Icon = "player" })
-        local Section = Tab:AddSection("Fitur")
-        Section:AddToggle({ Title = "Auto Farm", Default = true, Callback = function(on) ... end })
-        Section:AddDropdown({ Title = "Target", Options = {...}, Multi = true, Callback = function(v) ... end })
-        ...
-        Library:Init()   -- WAJIB di baris paling bawah: mengaktifkan semua fitur sesuai config
-
-    Catatan penting:
-    - Semua toggle/dropdown/input yang punya config akan otomatis memulihkan nilainya
-      dari file config, lalu callback-nya dijalankan tepat sekali saat Library:Init().
-      Jadi tidak akan ada lagi kasus "visual ON tapi fitur OFF".
-    - Judul komponen dipakai sebagai kunci config (mis. "Auto Farm" -> Toggles.Auto_Farm),
-      jadi gunakan judul yang unik per jenis komponen. Judul duplikat akan diberi warn.
-    - Komponen dengan NoSave = true tidak disimpan & tidak diaktifkan otomatis saat Init
-      (dipakai untuk kontrol UI sementara, mis. tombol "Auto Save Config").
-]]
 local Library = {}
 Library.flags = {}
 Library.pages = {}
@@ -183,12 +160,23 @@ local function DeepCopy(original, _seen)
     end
     return copy
 end
+-- Tabel dianggap "list" (array selection multi-dropdown, dsb) jika semua key-nya angka
+-- atau kosong. List HARUS di-replace saat merge, bukan digabung per-index -- kalau tidak,
+-- menghapus item (mis. deselect di multi-dropdown) tidak akan tersimpan.
+local function isListLike(t)
+    if type(t) ~= "table" then return false end
+    for k in pairs(t) do
+        if type(k) ~= "number" then return false end
+    end
+    return true
+end
 local function MergeTables(target, source)
     for k, v in pairs(source) do
-        if type(v) == "table" and type(target[k]) == "table" then
-            MergeTables(target[k], v)
+        if type(v) == "table" and type(target[k]) == "table"
+           and not isListLike(v) and not isListLike(target[k]) then
+            MergeTables(target[k], v)      -- gabung namespace (map) secara rekursif
         else
-            target[k] = v
+            target[k] = DeepCopy(v)        -- ganti scalar/list; deep-copy agar tak alias JSON
         end
     end
 end
@@ -233,7 +221,11 @@ function Library.ConfigSystem.Get(path, default)
         if type(value) ~= "table" then return default end
         value = value[key]
     end
-    return value ~= nil and value or default
+    -- Penting: pakai perbandingan nil eksplisit. Pola "value ~= nil and value or default"
+    -- akan salah mengembalikan default ketika nilai tersimpan adalah `false` (mis. toggle
+    -- Default=true yang dimatikan lalu di-load ulang).
+    if value == nil then return default end
+    return value
 end
 function Library.ConfigSystem.Set(path, value)
     if not path then return end
@@ -251,6 +243,12 @@ function Library.ConfigSystem.Reset()
     Library.ConfigSystem.Save()
 end
 function Library.ConfigSystem.Delete()
+    -- batalkan autosave tertunda + reset flag, supaya file tidak ditulis ulang setelah dihapus
+    isDirty = false
+    if Library._saveThread then
+        pcall(function() task.cancel(Library._saveThread) end)
+        Library._saveThread = nil
+    end
     if isfile(CONFIG_FILE) then
         delfile(CONFIG_FILE)
     end
@@ -263,13 +261,12 @@ local function MarkDirty()
         Library._saveThread = nil
     end
     Library._saveThread = task.delay(2, function()
-        if not isDirty then
-            Library._saveThread = nil
-            return
-        end
-        local ok = pcall(function() Library.ConfigSystem.Save() end)
-        isDirty = false
         Library._saveThread = nil
+        if not isDirty then return end
+        -- tandai bersih SEBELUM Save: kalau Save sempat yield lalu ada perubahan baru,
+        -- MarkDirty akan set isDirty=true lagi & menjadwalkan simpan berikutnya (tidak hilang).
+        isDirty = false
+        pcall(function() Library.ConfigSystem.Save() end)
     end)
 end
 local function RegisterCallback(configPath, callback, componentType, defaultValue, updateVisualFn)
